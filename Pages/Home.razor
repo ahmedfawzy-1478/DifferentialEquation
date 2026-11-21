@@ -1,0 +1,913 @@
+﻿@page "/"
+@using System.Globalization
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Components.Web
+@using DifferentialEquation.Models
+
+<PageTitle>Newton-Raphson Method</PageTitle>
+
+<div class="page-wrapper">
+    <div class="box">
+        <div class="inputs-grid">
+            <div class="input-group wide">
+                <label for="eqInput">Function f(x):</label>
+                <input id="eqInput" type="text" @bind="equation" placeholder="e.g. x^3 - 8*x + 5" />
+            </div>
+
+            <div class="input-group">
+                <label for="x0Input">Initial Value (x0):</label>
+                <input id="x0Input" type="number" step="any" @bind="x0" />
+            </div>
+
+            <div class="input-group">
+                <label for="tolInput">Tolerance (Error):</label>
+                <input id="tolInput" type="number" step="any" @bind="tolerance" />
+            </div>
+
+            <div class="input-group">
+                <label for="maxInput">Max Iterations:</label>
+                <input id="maxInput" type="number" @bind="maxIterations" />
+            </div>
+
+            <div class="input-group btn-group">
+                <button type="button" class="btn-run" @onclick="RunSolver">Calculate</button>
+            </div>
+        </div>
+
+        <div class="note">
+            Formula: x<sub>i+1</sub> = x<sub>i</sub> - f(x<sub>i</sub>) / f'(x<sub>i</sub>) | Supported: +, -, *, /, ^, sin(x), cos(x), tan(x), exp(x), ln(x), sqrt(x)
+        </div>
+    </div>
+
+    @if (result is not null && !result.IsSuccess)
+    {
+        <div class="error-box">
+            Error: @result.ErrorMessage
+        </div>
+    }
+
+    @if (result is not null && result.IsSuccess)
+    {
+        <div class="box summary-box">
+            <h3>Results Summary</h3>
+            <table class="summary-table">
+                <tbody>
+                    <tr>
+                        <td><strong>Approximate Root (x):</strong></td>
+                        <td>@result.Root.ToString("F6", CultureInfo.InvariantCulture)</td>
+                        <td><strong>Value of f(x) at Root:</strong></td>
+                        <td>@result.FinalFx.ToString("E3", CultureInfo.InvariantCulture)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Number of Substitutions:</strong></td>
+                        <td>@result.TotalIterations</td>
+                        <td><strong>Convergence Condition:</strong></td>
+                        <td>
+                            @(double.IsInfinity(result.ConvergenceRatio) ? "Infinity" : result.ConvergenceRatio.ToString("F5", CultureInfo.InvariantCulture))
+                            (@(result.SatisfiesConvergenceCondition ? "Valid < 1" : "Warning >= 1"))
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="content-columns">
+            <div class="box">
+                <div class="section-bar">
+                    <h3>Function Graph</h3>
+                    <div class="graph-controls">
+                        <label class="check-label">
+                            <input type="checkbox" @bind="showTangents" /> Tangents
+                        </label>
+                        <button type="button" class="btn-tool" @onclick="FocusRoot" title="Zoom into Root">Focus Root</button>
+                        <button type="button" class="btn-zoom" @onclick="ZoomIn" title="Zoom In">+</button>
+                        <button type="button" class="btn-zoom" @onclick="ZoomOut" title="Zoom Out">-</button>
+                        <button type="button" class="btn-tool" @onclick="ResetView" title="Reset View">Reset</button>
+                    </div>
+                </div>
+
+                @{
+                    List<double> xTicks = GenerateNiceTicks(viewXMin, viewXMax, 7);
+                    List<double> yTicks = GenerateNiceTicks(viewYMin, viewYMax, 6);
+                    List<PlacedLabel> pointLabels = ComputePointLabels();
+                }
+
+                <svg viewBox="0 0 @SvgWidth @SvgHeight"
+                     class="graph-svg @(isDragging ? "dragging" : "")"
+                     @onmousedown="OnMouseDown"
+                     @onmousemove="OnMouseMove"
+                     @onmouseup="OnMouseUp"
+                     @onmouseleave="OnMouseLeave">
+
+                    <defs>
+                        <clipPath id="plotAreaClip">
+                            <rect x="@PadLeft" y="@PadTop" width="@PlotWidth" height="@PlotHeight" />
+                        </clipPath>
+                    </defs>
+
+                    <rect x="@PadLeft" y="@PadTop" width="@PlotWidth" height="@PlotHeight" fill="#fcfdfe" stroke="#cbd5e1" stroke-width="1.2" />
+
+                    @foreach (double gxVal in xTicks)
+                    {
+                        double gxPx = MapX(gxVal);
+                        if (gxPx >= PadLeft - 0.5 && gxPx <= PadLeft + PlotWidth + 0.5)
+                        {
+                            <line x1="@Fmt(gxPx)" y1="@PadTop" x2="@Fmt(gxPx)" y2="@(PadTop + PlotHeight)" stroke="#e2e8f0" stroke-width="1" />
+                            <line x1="@Fmt(gxPx)" y1="@(PadTop + PlotHeight)" x2="@Fmt(gxPx)" y2="@(PadTop + PlotHeight + 5)" stroke="#64748b" stroke-width="1" />
+                            @SvgText(gxPx, PadTop + PlotHeight + 18, FormatAxisTick(gxVal), "middle", "#475569", 11)
+                        }
+                    }
+
+                    @foreach (double gyVal in yTicks)
+                    {
+                        double gyPx = MapY(gyVal);
+                        if (gyPx >= PadTop - 0.5 && gyPx <= PadTop + PlotHeight + 0.5)
+                        {
+                            <line x1="@PadLeft" y1="@Fmt(gyPx)" x2="@(PadLeft + PlotWidth)" y2="@Fmt(gyPx)" stroke="#e2e8f0" stroke-width="1" />
+                            <line x1="@(PadLeft - 5)" y1="@Fmt(gyPx)" x2="@PadLeft" y2="@Fmt(gyPx)" stroke="#64748b" stroke-width="1" />
+                            @SvgText(PadLeft - 8, gyPx + 4, FormatAxisTick(gyVal), "end", "#475569", 11)
+                        }
+                    }
+
+                    <g clip-path="url(#plotAreaClip)">
+                        @if (viewYMin <= 0 && viewYMax >= 0)
+                        {
+                            double yZero = MapY(0);
+                            <line x1="@PadLeft" y1="@Fmt(yZero)" x2="@(PadLeft + PlotWidth)" y2="@Fmt(yZero)" stroke="#334155" stroke-width="1.4" />
+                            @SvgText(PadLeft + PlotWidth - 8, yZero - 6, "x", "end", "#1e293b", 12, "bold")
+                        }
+
+                        @if (viewXMin <= 0 && viewXMax >= 0)
+                        {
+                            double xZero = MapX(0);
+                            <line x1="@Fmt(xZero)" y1="@PadTop" x2="@Fmt(xZero)" y2="@(PadTop + PlotHeight)" stroke="#334155" stroke-width="1.4" />
+                            @SvgText(xZero + 9, PadTop + 14, "y", "start", "#1e293b", 12, "bold")
+                        }
+
+                        @foreach (var segment in visibleCurveSegments)
+                        {
+                            if (segment.Count > 1)
+                            {
+                                string pointsAttr = string.Join(" ", segment.Select(p => $"{Fmt(MapX(p.X))},{Fmt(MapY(p.Y))}"));
+                                <polyline fill="none" stroke="#1d4ed8" stroke-width="2.3" stroke-linejoin="round" points="@pointsAttr" />
+                            }
+                        }
+
+                        @for (int idx = 0; idx < result.Steps.Count; idx++)
+                        {
+                            var step = result.Steps[idx];
+                            double sx = MapX(step.X);
+                            double sy = MapY(step.Fx);
+                            double sZeroY = MapY(0);
+
+                            <line x1="@Fmt(sx)" y1="@Fmt(sZeroY)" x2="@Fmt(sx)" y2="@Fmt(sy)" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3" />
+
+                            if (showTangents && idx < result.Steps.Count - 1)
+                            {
+                                var nextStep = result.Steps[idx + 1];
+                                double nextSx = MapX(nextStep.X);
+                                <line x1="@Fmt(sx)" y1="@Fmt(sy)" x2="@Fmt(nextSx)" y2="@Fmt(sZeroY)" stroke="#dc2626" stroke-width="1.3" stroke-dasharray="5,3" />
+                            }
+                        }
+
+                        @foreach (var lbl in pointLabels)
+                        {
+                            if (lbl.HasLeader)
+                            {
+                                <line x1="@Fmt(lbl.AnchorX)" y1="@Fmt(lbl.AnchorY)" x2="@Fmt(lbl.TextX)" y2="@Fmt(lbl.LeaderEndY)" stroke="#64748b" stroke-width="1" />
+                            }
+                            @SvgHaloText(lbl.TextX, lbl.TextY, lbl.Text, "middle", lbl.Color, 11, lbl.IsBold ? "bold" : "normal")
+                        }
+
+                        @for (int idx = 0; idx < result.Steps.Count; idx++)
+                        {
+                            int currentIndex = idx;
+                            var step = result.Steps[idx];
+                            double sx = MapX(step.X);
+                            double sy = MapY(step.Fx);
+                            bool isFirst = idx == 0;
+                            bool isLast = idx == result.Steps.Count - 1;
+                            bool isHovered = hoveredStepIndex == idx;
+                            string fill = isLast ? "#15803d" : (isFirst ? "#d97706" : "#2563eb");
+                            double radius = isHovered ? 7.0 : (isLast ? 5.8 : 4.2);
+
+                            if (isHovered)
+                            {
+                                <circle cx="@Fmt(sx)" cy="@Fmt(sy)" r="10.5" fill="none" stroke="@fill" stroke-width="1.5" opacity="0.55" />
+                            }
+
+                            <circle cx="@Fmt(sx)"
+                                    cy="@Fmt(sy)"
+                                    r="@Fmt(radius)"
+                                    fill="@fill"
+                                    stroke="#ffffff"
+                                    stroke-width="1.5"
+                                    style="cursor: pointer;"
+                                    @onmouseover="() => hoveredStepIndex = currentIndex"
+                                    @onmouseout="() => hoveredStepIndex = null" />
+                        }
+
+                        @if (hoveredStepIndex.HasValue && hoveredStepIndex.Value >= 0 && hoveredStepIndex.Value < result.Steps.Count)
+                        {
+                            var hStep = result.Steps[hoveredStepIndex.Value];
+                            double hx = MapX(hStep.X);
+                            double hy = MapY(hStep.Fx);
+                            @SvgTooltip(hx, hy, hStep)
+                        }
+                    </g>
+                </svg>
+
+                <div class="legend-row">
+                    <span><b style="color:#1d4ed8;">&#9632;</b> f(x)</span>
+                    <span><b style="color:#d97706;">&#9679;</b> x0</span>
+                    <span><b style="color:#2563eb;">&#9679;</b> Steps</span>
+                    <span><b style="color:#dc2626;">---</b> Tangent</span>
+                    <span><b style="color:#15803d;">&#9679;</b> Root</span>
+                    <span style="margin-left:auto; color:#64748b;">Drag to pan | Hover points for details</span>
+                </div>
+            </div>
+
+            <div class="box">
+                <div class="section-bar">
+                    <h3>Substitution Steps</h3>
+                </div>
+
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>i</th>
+                                <th>x<sub>i</sub></th>
+                                <th>f(x<sub>i</sub>)</th>
+                                <th>f'(x<sub>i</sub>)</th>
+                                <th>|x<sub>i</sub> - x<sub>i-1</sub>|</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @for (int idx = 0; idx < result.Steps.Count; idx++)
+                            {
+                                int rowIdx = idx;
+                                var step = result.Steps[idx];
+                                bool isFinal = step.Iteration == result.TotalIterations;
+                                bool isRowHovered = hoveredStepIndex == rowIdx;
+                                <tr class="@(isFinal ? "final-row" : "") @(isRowHovered ? "hover-row" : "")"
+                                    @onmouseover="() => hoveredStepIndex = rowIdx"
+                                    @onmouseout="() => hoveredStepIndex = null">
+                                    <td>@step.Iteration</td>
+                                    <td>@step.X.ToString("F6", CultureInfo.InvariantCulture)</td>
+                                    <td>@step.Fx.ToString("F6", CultureInfo.InvariantCulture)</td>
+                                    <td>@step.Dfx.ToString("F6", CultureInfo.InvariantCulture)</td>
+                                    <td>@(step.Error.HasValue? step.Error.Value.ToString("F6", CultureInfo.InvariantCulture) : "-")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+<style>
+    .page-wrapper {
+        max-width: 1140px;
+        margin: 0 auto;
+        padding: 20px;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #222222;
+    }
+
+    .box {
+        background-color: #ffffff;
+        border: 1px solid #cccccc;
+        border-radius: 4px;
+        padding: 15px;
+        margin-bottom: 16px;
+    }
+
+        .box h3 {
+            margin: 0 0 10px;
+            font-size: 16px;
+            color: #111111;
+        }
+
+    .inputs-grid {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr 1fr auto;
+        gap: 12px;
+        align-items: end;
+    }
+
+    .input-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+        .input-group label {
+            font-size: 13px;
+            font-weight: bold;
+            color: #333333;
+        }
+
+        .input-group input {
+            padding: 7px 9px;
+            border: 1px solid #bbbbbb;
+            border-radius: 3px;
+            font-size: 14px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+            .input-group input:focus {
+                outline: none;
+                border-color: #0056b3;
+            }
+
+    .btn-run {
+        background-color: #0056b3;
+        color: #ffffff;
+        border: 1px solid #004494;
+        border-radius: 3px;
+        padding: 8px 18px;
+        font-size: 14px;
+        font-weight: bold;
+        cursor: pointer;
+    }
+
+        .btn-run:hover {
+            background-color: #004494;
+        }
+
+    .note {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #555555;
+        background-color: #f7f7f7;
+        padding: 6px 10px;
+        border-left: 3px solid #0056b3;
+    }
+
+    .error-box {
+        background-color: #fdecea;
+        border: 1px solid #f5c6cb;
+        color: #a94442;
+        padding: 10px 14px;
+        border-radius: 4px;
+        margin-bottom: 16px;
+        font-size: 14px;
+    }
+
+    .summary-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+    }
+
+        .summary-table td {
+            padding: 7px 10px;
+            border: 1px solid #dddddd;
+        }
+
+            .summary-table td:nth-child(odd) {
+                background-color: #f5f7fa;
+                width: 24%;
+            }
+
+    .content-columns {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 16px;
+        align-items: start;
+    }
+
+    .section-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #e0e0e0;
+        padding-bottom: 8px;
+        margin-bottom: 10px;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+        .section-bar h3 {
+            margin: 0;
+        }
+
+    .graph-controls {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .check-label {
+        font-size: 13px;
+        color: #333333;
+        cursor: pointer;
+        user-select: none;
+        margin-right: 4px;
+    }
+
+    .btn-zoom,
+    .btn-tool {
+        background-color: #f0f2f5;
+        color: #222222;
+        border: 1px solid #bbbbbb;
+        border-radius: 3px;
+        padding: 3px 8px;
+        font-size: 12px;
+        cursor: pointer;
+    }
+
+    .btn-zoom {
+        font-weight: bold;
+        min-width: 26px;
+        font-size: 13px;
+    }
+
+        .btn-zoom:hover,
+        .btn-tool:hover {
+            background-color: #e2e6ea;
+        }
+
+    .graph-svg {
+        width: 100%;
+        height: auto;
+        display: block;
+        cursor: grab;
+        user-select: none;
+    }
+
+        .graph-svg.dragging {
+            cursor: grabbing;
+        }
+
+    .legend-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 11px;
+        margin-top: 8px;
+        font-size: 12px;
+        color: #444444;
+    }
+
+    .table-scroll {
+        max-height: 420px;
+        overflow-y: auto;
+        border: 1px solid #cccccc;
+    }
+
+    .data-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        text-align: center;
+    }
+
+        .data-table th {
+            position: sticky;
+            top: 0;
+            background-color: #f0f2f5;
+            color: #111111;
+            padding: 8px 6px;
+            border-bottom: 1px solid #bbbbbb;
+            border-right: 1px solid #dddddd;
+        }
+
+        .data-table td {
+            padding: 6px;
+            border-bottom: 1px solid #e0e0e0;
+            border-right: 1px solid #eeeeee;
+        }
+
+        .data-table tbody tr:nth-child(even) {
+            background-color: #fafafa;
+        }
+
+        .data-table tbody tr:hover,
+        .hover-row {
+            background-color: #eff6ff !important;
+        }
+
+    .final-row {
+        background-color: #e8f5e9 !important;
+        font-weight: bold;
+        color: #1b5e20;
+    }
+
+    @@media (max-width: 900px) {
+        .inputs-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+
+        .wide, .btn-group {
+            grid-column: span 2;
+        }
+
+        .content-columns {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+
+@code {
+    private sealed record LabelBox(double Left, double Top, double Right, double Bottom)
+    {
+        public bool Overlaps(LabelBox other, double margin = 5.0)
+        {
+            return !(Right + margin < other.Left ||
+                     Left - margin > other.Right ||
+                     Bottom + margin < other.Top ||
+                     Top - margin > other.Bottom);
+        }
+    }
+
+    private sealed record PlacedLabel(
+        double TextX,
+        double TextY,
+        string Text,
+        string Color,
+        bool IsBold,
+        bool HasLeader,
+        double AnchorX,
+        double AnchorY,
+        double LeaderEndY
+    );
+
+    private string equation = "x^4 - 11*x + 8";
+    private string solvedEquation = "x^4 - 11*x + 8";
+    private double x0 = 2;
+    private double tolerance = 0.0001;
+    private int maxIterations = 100;
+    private bool showTangents = true;
+    private SolverResult? result;
+    private int? hoveredStepIndex;
+
+    private double viewXMin;
+    private double viewXMax;
+    private double viewYMin;
+    private double viewYMax;
+    private List<List<PlotPoint>> visibleCurveSegments = new();
+
+    private bool isDragging;
+    private double lastMouseX;
+    private double lastMouseY;
+
+    private const double SvgWidth = 640;
+    private const double SvgHeight = 400;
+    private const double PadLeft = 62;
+    private const double PadRight = 22;
+    private const double PadTop = 22;
+    private const double PadBottom = 36;
+    private double PlotWidth => SvgWidth - PadLeft - PadRight;
+    private double PlotHeight => SvgHeight - PadTop - PadBottom;
+
+    protected override void OnInitialized()
+    {
+        RunSolver();
+    }
+
+    private void RunSolver()
+    {
+        hoveredStepIndex = null;
+        result = NewtonRaphsonSolver.Solve(equation, x0, tolerance, maxIterations);
+        if (result.IsSuccess)
+        {
+            solvedEquation = equation;
+            ResetView();
+        }
+    }
+
+    private void ResetView()
+    {
+        if (result is null || !result.IsSuccess) return;
+        viewXMin = result.XMin;
+        viewXMax = result.XMax;
+        viewYMin = result.YMin;
+        viewYMax = result.YMax;
+        RebuildVisibleCurve();
+    }
+
+    private void FocusRoot()
+    {
+        if (result is null || !result.IsSuccess) return;
+
+        double delta = 0.05;
+        for (int i = result.Steps.Count - 2; i >= 0; i--)
+        {
+            double d = Math.Abs(result.Root - result.Steps[i].X);
+            if (d > 1e-6)
+            {
+                delta = d;
+                break;
+            }
+        }
+
+        double halfX = Math.Clamp(delta * 1.6, 1e-4, 1.0);
+        viewXMin = result.Root - halfX;
+        viewXMax = result.Root + halfX;
+
+        double yAtMin = Math.Abs(SafeEval(solvedEquation, viewXMin));
+        double yAtMax = Math.Abs(SafeEval(solvedEquation, viewXMax));
+        double halfY = Math.Max(Math.Max(yAtMin, yAtMax) * 1.35, 1e-4);
+
+        viewYMin = -halfY;
+        viewYMax = halfY;
+
+        RebuildVisibleCurve();
+    }
+
+    private static double SafeEval(string expr, double val)
+    {
+        try
+        {
+            double r = MathExpressionParser.Evaluate(expr, val);
+            return double.IsNaN(r) || double.IsInfinity(r) ? 0.1 : r;
+        }
+        catch
+        {
+            return 0.1;
+        }
+    }
+
+    private void ZoomIn()
+    {
+        ApplyZoom(0.75);
+    }
+
+    private void ZoomOut()
+    {
+        ApplyZoom(1.33);
+    }
+
+    private void ApplyZoom(double factor)
+    {
+        if (result is null || !result.IsSuccess) return;
+
+        double currentXSpan = viewXMax - viewXMin;
+        double currentYSpan = viewYMax - viewYMin;
+        double newXSpan = currentXSpan * factor;
+        double newYSpan = currentYSpan * factor;
+
+        if (newXSpan < 1e-8 || newXSpan > 1e8 || newYSpan < 1e-8 || newYSpan > 1e8) return;
+
+        double centerX = (viewXMin + viewXMax) / 2.0;
+        double centerY = (viewYMin + viewYMax) / 2.0;
+
+        viewXMin = centerX - newXSpan / 2.0;
+        viewXMax = centerX + newXSpan / 2.0;
+        viewYMin = centerY - newYSpan / 2.0;
+        viewYMax = centerY + newYSpan / 2.0;
+
+        RebuildVisibleCurve();
+    }
+
+    private void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button != 0) return;
+        isDragging = true;
+        lastMouseX = e.OffsetX;
+        lastMouseY = e.OffsetY;
+    }
+
+    private void OnMouseMove(MouseEventArgs e)
+    {
+        if (!isDragging || result is null || !result.IsSuccess) return;
+
+        double dxPx = e.OffsetX - lastMouseX;
+        double dyPx = e.OffsetY - lastMouseY;
+        lastMouseX = e.OffsetX;
+        lastMouseY = e.OffsetY;
+
+        double xSpan = viewXMax - viewXMin;
+        double ySpan = viewYMax - viewYMin;
+
+        double dxData = (dxPx / PlotWidth) * xSpan;
+        double dyData = (dyPx / PlotHeight) * ySpan;
+
+        viewXMin -= dxData;
+        viewXMax -= dxData;
+        viewYMin += dyData;
+        viewYMax += dyData;
+
+        RebuildVisibleCurve();
+    }
+
+    private void OnMouseUp(MouseEventArgs e)
+    {
+        isDragging = false;
+    }
+
+    private void OnMouseLeave(MouseEventArgs e)
+    {
+        isDragging = false;
+        hoveredStepIndex = null;
+    }
+
+    private void RebuildVisibleCurve()
+    {
+        List<List<PlotPoint>> segments = new();
+        List<PlotPoint> currentSegment = new();
+        int sampleCount = 280;
+        double stepSize = (viewXMax - viewXMin) / sampleCount;
+
+        for (int k = 0; k <= sampleCount; k++)
+        {
+            double sx = viewXMin + k * stepSize;
+            try
+            {
+                double sy = MathExpressionParser.Evaluate(solvedEquation, sx);
+                if (!double.IsNaN(sy) && !double.IsInfinity(sy) && Math.Abs(sy) < 1e7)
+                {
+                    currentSegment.Add(new PlotPoint(sx, sy));
+                }
+                else if (currentSegment.Count > 0)
+                {
+                    segments.Add(currentSegment);
+                    currentSegment = new List<PlotPoint>();
+                }
+            }
+            catch
+            {
+                if (currentSegment.Count > 0)
+                {
+                    segments.Add(currentSegment);
+                    currentSegment = new List<PlotPoint>();
+                }
+            }
+        }
+
+        if (currentSegment.Count > 0)
+        {
+            segments.Add(currentSegment);
+        }
+
+        visibleCurveSegments = segments;
+    }
+
+    private List<PlacedLabel> ComputePointLabels()
+    {
+        List<PlacedLabel> labels = new();
+        if (result is null || !result.IsSuccess || result.Steps.Count == 0) return labels;
+
+        List<LabelBox> occupied = new();
+        int lastIdx = result.Steps.Count - 1;
+        var rootStep = result.Steps[lastIdx];
+        double rootSx = MapX(rootStep.X);
+        double rootSy = MapY(rootStep.Fx);
+
+        if (IsInsidePlot(rootSx, rootSy))
+        {
+            bool approachFromAbove = lastIdx > 0 && MapY(result.Steps[lastIdx - 1].Fx) < rootSy - 1.0;
+            string rootText = $"Root = {rootStep.X.ToString("F4", CultureInfo.InvariantCulture)}";
+            double halfW = rootText.Length * 3.4;
+            double textX = Math.Clamp(rootSx, PadLeft + halfW + 4, PadLeft + PlotWidth - halfW - 4);
+            double textY = approachFromAbove ? rootSy + 24 : rootSy - 15;
+            textY = Math.Clamp(textY, PadTop + 14, PadTop + PlotHeight - 6);
+            double leaderEndY = approachFromAbove ? textY - 10 : textY + 3;
+
+            occupied.Add(new LabelBox(textX - halfW, textY - 11, textX + halfW, textY + 3));
+            labels.Add(new PlacedLabel(textX, textY, rootText, "#15803d", true, true, rootSx, rootSy, leaderEndY));
+        }
+
+        for (int idx = 0; idx < lastIdx; idx++)
+        {
+            var step = result.Steps[idx];
+            double sx = MapX(step.X);
+            double sy = MapY(step.Fx);
+
+            if (!IsInsidePlot(sx, sy)) continue;
+
+            string text = $"x{step.Iteration}";
+            double halfW = text.Length * 3.6;
+
+            double[] candidateOffsets = { -11.0, 19.0 };
+            foreach (double offsetY in candidateOffsets)
+            {
+                double textX = Math.Clamp(sx, PadLeft + halfW + 4, PadLeft + PlotWidth - halfW - 4);
+                double textY = sy + offsetY;
+
+                if (textY < PadTop + 12 || textY > PadTop + PlotHeight - 5) continue;
+
+                LabelBox candidateBox = new(textX - halfW, textY - 11, textX + halfW, textY + 3);
+                bool hasOverlap = occupied.Any(b => b.Overlaps(candidateBox));
+
+                if (!hasOverlap)
+                {
+                    occupied.Add(candidateBox);
+                    string color = idx == 0 ? "#b45309" : "#1e293b";
+                    labels.Add(new PlacedLabel(textX, textY, text, color, idx == 0, false, sx, sy, textY));
+                    break;
+                }
+            }
+        }
+
+        return labels;
+    }
+
+    private bool IsInsidePlot(double px, double py)
+    {
+        return px >= PadLeft && px <= PadLeft + PlotWidth &&
+               py >= PadTop && py <= PadTop + PlotHeight;
+    }
+
+    private static List<double> GenerateNiceTicks(double min, double max, int maxTicks)
+    {
+        List<double> ticks = new();
+        double range = max - min;
+        if (range <= 0 || double.IsNaN(range) || double.IsInfinity(range)) return ticks;
+
+        double roughStep = range / (maxTicks - 1);
+        double mag = Math.Pow(10, Math.Floor(Math.Log10(roughStep)));
+        double residual = roughStep / mag;
+
+        double niceStep = residual switch
+        {
+            <= 1.5 => 1.0 * mag,
+            <= 3.0 => 2.0 * mag,
+            <= 7.0 => 5.0 * mag,
+            _ => 10.0 * mag
+        };
+
+        double firstTick = Math.Ceiling(min / niceStep) * niceStep;
+        for (double t = firstTick; t <= max + niceStep * 0.001; t += niceStep)
+        {
+            double clean = Math.Abs(t) < niceStep * 1e-9 ? 0.0 : t;
+            ticks.Add(clean);
+        }
+
+        return ticks;
+    }
+
+    private static string FormatAxisTick(double val)
+    {
+        if (Math.Abs(val) >= 10000 || (Math.Abs(val) > 0 && Math.Abs(val) < 0.001))
+        {
+            return val.ToString("G3", CultureInfo.InvariantCulture);
+        }
+        return Math.Round(val, 6).ToString("G5", CultureInfo.InvariantCulture);
+    }
+
+    private double MapX(double x)
+    {
+        return PadLeft + ((x - viewXMin) / (viewXMax - viewXMin)) * PlotWidth;
+    }
+
+    private double MapY(double y)
+    {
+        return PadTop + PlotHeight - ((y - viewYMin) / (viewYMax - viewYMin)) * PlotHeight;
+    }
+
+    private static string Fmt(double value)
+    {
+        return value.ToString("F2", CultureInfo.InvariantCulture);
+    }
+
+    private static MarkupString SvgText(double x, double y, string text, string anchor, string fill, int fontSize, string fontWeight = "normal")
+    {
+        string escaped = System.Net.WebUtility.HtmlEncode(text);
+        string tag = $"<text x=\"{Fmt(x)}\" y=\"{Fmt(y)}\" text-anchor=\"{anchor}\" fill=\"{fill}\" font-size=\"{fontSize}\" font-weight=\"{fontWeight}\">{escaped}</text>";
+        return new MarkupString(tag);
+    }
+
+    private static MarkupString SvgHaloText(double x, double y, string text, string anchor, string fill, int fontSize, string fontWeight = "normal")
+    {
+        string escaped = System.Net.WebUtility.HtmlEncode(text);
+        string tag = $"<text x=\"{Fmt(x)}\" y=\"{Fmt(y)}\" text-anchor=\"{anchor}\" fill=\"{fill}\" stroke=\"#ffffff\" stroke-width=\"3.5\" paint-order=\"stroke\" stroke-linejoin=\"round\" font-size=\"{fontSize}\" font-weight=\"{fontWeight}\">{escaped}</text>";
+        return new MarkupString(tag);
+    }
+
+    private MarkupString SvgTooltip(double px, double py, IterationStep step)
+    {
+        double boxW = 165;
+        double boxH = 54;
+        double boxX = px + 12;
+        if (boxX + boxW > PadLeft + PlotWidth - 4)
+        {
+            boxX = px - boxW - 12;
+        }
+        boxX = Math.Clamp(boxX, PadLeft + 4, PadLeft + PlotWidth - boxW - 4);
+
+        double boxY = py - boxH - 8;
+        if (boxY < PadTop + 4)
+        {
+            boxY = py + 12;
+        }
+        boxY = Math.Clamp(boxY, PadTop + 4, PadTop + PlotHeight - boxH - 4);
+
+        string line1 = $"Iteration i = {step.Iteration}";
+        string line2 = $"x = {step.X.ToString("F6", CultureInfo.InvariantCulture)}";
+        string line3 = $"f(x) = {step.Fx.ToString("F6", CultureInfo.InvariantCulture)}";
+
+        string svg = $"<g style=\"pointer-events:none;\">" +
+                     $"<rect x=\"{Fmt(boxX)}\" y=\"{Fmt(boxY)}\" width=\"{Fmt(boxW)}\" height=\"{Fmt(boxH)}\" rx=\"4\" fill=\"#1e293b\" opacity=\"0.94\" />" +
+                     $"<text x=\"{Fmt(boxX + 8)}\" y=\"{Fmt(boxY + 15)}\" fill=\"#f8fafc\" font-size=\"11\" font-weight=\"bold\">{line1}</text>" +
+                     $"<text x=\"{Fmt(boxX + 8)}\" y=\"{Fmt(boxY + 31)}\" fill=\"#cbd5e1\" font-size=\"11\">{line2}</text>" +
+                     $"<text x=\"{Fmt(boxX + 8)}\" y=\"{Fmt(boxY + 46)}\" fill=\"#cbd5e1\" font-size=\"11\">{line3}</text>" +
+                     $"</g>";
+
+        return new MarkupString(svg);
+    }
+}
